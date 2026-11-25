@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(ROOT, "config.json")
@@ -222,6 +222,14 @@ def street_hits(text, cfg):
     return [s for s in cfg.get("streets", []) if normalize(s) and normalize(s) in n]
 
 
+def post_hits(post, cfg):
+    """Улицы записи: у сохранённой истории они лежат готовым списком."""
+    streets = post.get("streets")
+    if isinstance(streets, list):
+        return streets
+    return street_hits(post.get("text") or "", cfg)
+
+
 def post_url(cfg, post):
     return "https://vk.com/wall-%d_%d" % (int(cfg["group_id"]), post["id"])
 
@@ -297,11 +305,64 @@ def outage_posts(posts, cfg):
     return [p for p in posts if is_outage(p.get("text") or "", cfg)]
 
 
+RU_MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня",
+             "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+
+
+def absolute_date(widget_date, now=None):
+    """«вчера в 7:36» -> «24 ноября 2026, 07:36» (чтобы история не старела)."""
+    s = (widget_date or "").strip()
+    m = re.match(r"(вчера|сегодня|завтра)\s+в\s+(\d{1,2}):(\d{2})", s, re.I)
+    if not m:
+        return s
+    base = (now or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=3)))
+    shift = {"вчера": -1, "сегодня": 0, "завтра": 1}[m.group(1).lower()]
+    d = base + timedelta(days=shift)
+    return "%d %s %d, %s:%s" % (d.day, RU_MONTHS[d.month - 1], d.year, m.group(2), m.group(3))
+
+
+def update_history(posts, cfg):
+    """Копит все отключения (для ответа «когда отключали» глубже 10 записей)."""
+    st = load_json(STATE_PATH, {}) or {}
+    hist = {int(h["id"]): h for h in (st.get("history") or [])
+            if isinstance(h, dict) and h.get("id")}
+    changed = False
+    for p in outage_posts(posts, cfg):
+        if int(p["id"]) in hist:
+            continue
+        hist[int(p["id"])] = {
+            "id": p["id"],
+            "date": absolute_date(p.get("date")),
+            "text": short_text(p, 700),
+            "streets": post_hits(p, cfg),
+        }
+        changed = True
+    if changed:
+        items = sorted(hist.values(), key=lambda h: int(h["id"]))[-60:]
+        state_patch(history=items)
+
+
+def known_outages(cfg, posts=None):
+    st = load_json(STATE_PATH, {}) or {}
+    hist = {}
+    for h in (st.get("history") or []):
+        if isinstance(h, dict) and h.get("id"):
+            hist[int(h["id"])] = h
+    for p in outage_posts(posts or [], cfg):
+        hist[int(p["id"])] = {
+            "id": p["id"],
+            "date": p.get("date") or "",
+            "text": short_text(p, 700),
+            "streets": post_hits(p, cfg),
+        }
+    return sorted(hist.values(), key=lambda h: int(h["id"]))
+
+
 def filter_by_street(posts, cfg):
     """В режиме only оставляет записи, где есть наша улица."""
     if cfg.get("street_mode", "mark") != "only":
         return posts
-    return [p for p in posts if street_hits(p.get("text") or "", cfg)]
+    return [p for p in posts if post_hits(p, cfg)]
 
 
 def street_phrase(cfg):
@@ -310,13 +371,13 @@ def street_phrase(cfg):
 
 
 def digest_recent_outages(cfg, posts, limit=5):
-    outs = filter_by_street(outage_posts(posts, cfg), cfg)
+    outs = filter_by_street(known_outages(cfg, posts), cfg)
     if not outs:
         return ("📰 В последних %d записях сообщества отключений %s не было."
                 % (len(posts), street_phrase(cfg)))
     lines = ["📰 Последние отключения %s:" % street_phrase(cfg), ""]
     for p in list(reversed(outs))[:limit]:
-        hits = street_hits(p.get("text") or "", cfg)
+        hits = post_hits(p, cfg)
         mark = ("   ⚡ " + ", ".join(hits)) if hits else ""
         lines.append("🗓 %s%s\n%s\n🔗 %s"
                      % (p.get("date") or "—", mark, short_text(p, 300), post_url(cfg, p)))
@@ -325,10 +386,10 @@ def digest_recent_outages(cfg, posts, limit=5):
 
 
 def digest_last(cfg, posts):
-    outs = filter_by_street(outage_posts(posts, cfg), cfg)
+    outs = filter_by_street(known_outages(cfg, posts), cfg)
     if not outs:
         return ("🕒 В последних %d записях сообщества отключений %s не было.\n"
-                "Бот видит только 10 последних записей — более старые не проверяются."
+                "Бот запоминает отключения начиная с 25.11.2026."
                 % (len(posts), street_phrase(cfg)))
     last = max(outs, key=lambda p: p["id"])
     hits = street_hits(last.get("text") or "", cfg)
@@ -349,10 +410,10 @@ def digest_status(cfg, posts):
         "Проверка ВК: каждые 5 минут",
         "Показываю: отключения %s" % street_phrase(cfg),
     ]
-    outs = filter_by_street(outage_posts(posts, cfg), cfg)
+    outs = filter_by_street(known_outages(cfg, posts), cfg)
     if outs:
-        lo = max(outs, key=lambda p: p["id"])
-        lines.append("Последнее отключение: %s (#%d)" % (lo.get("date") or "—", lo["id"]))
+        lo = max(outs, key=lambda p: int(p["id"]))
+        lines.append("Последнее отключение: %s (#%d)" % (lo.get("date") or "—", int(lo["id"])))
     else:
         lines.append("В последних записях отключений не было")
     lines += ["", "Кнопки: /start"]
@@ -377,7 +438,7 @@ def pick_to_send(new_posts, state, cfg):
         if not is_outage(p["text"], cfg):
             log("  пропуск %d: не про отключение электроэнергии" % p["id"])
             continue
-        hits = street_hits(p["text"], cfg)
+        hits = post_hits(p, cfg)
         mode = cfg.get("street_mode", "mark")
         if mode == "only" and not hits:
             log("  пропуск %d: нет улицы из списка (режим only)" % p["id"])
@@ -397,6 +458,7 @@ def send_notifications(cfg, token, chat_id, to_send):
 
 def handle_check_now(cfg, token, chat_id, vk_token):
     posts, _raw = get_posts(cfg, vk_token)
+    update_history(posts, cfg)
     state = load_json(STATE_PATH, {}) or {}
     prev_max, pool_max, new_posts = compute_new(posts, state)
     if prev_max <= 0:
@@ -559,6 +621,8 @@ def main():
     if not posts:
         log("ОШИБКА: список записей пуст")
         return 1
+    if not args.dry_run:
+        update_history(posts, cfg)
 
     state = load_json(STATE_PATH, {}) or {}
     prev_max, pool_max, new_posts = compute_new(posts, state, args.force_new_id)
