@@ -417,6 +417,8 @@ def street_addresses(text, cfg):
                       part, flags=re.I).strip(" -–—.")
         low = normalize(part)
         if part and any(normalize(n) in low for n in names):
+            part = re.sub(r"\b(ул|пер|просп|б-р|д|кв)\.\s*(?=[А-ЯЁA-Za-z0-9])",
+                          r"\1. ", part)
             found.append(re.sub(r"\s+", " ", part))
     return "; ".join(dict.fromkeys(found))
 
