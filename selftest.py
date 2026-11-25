@@ -53,7 +53,14 @@ def main():
 
         out = v.digest_recent_outages(CFG, POSTS)
         check("в отключениях 2 записи", out.count("🔗") == 2)
-        check("в отключениях помечены обе улицы", "Авиаторов" in out and "Авиационная" in out)
+        check("показываем только наши улицы", "Авиаторов" in out and "Авиационная" not in out)
+        check("время отключения извлекается",
+              v.time_range("с 10:00 до 17:00") == "10:00–17:00")
+        check("адрес по Авиаторов извлекается",
+              "Авиаторов" in v.street_addresses(POSTS[1]["text"], CFG))
+        check("«завтра» помечается в дате",
+              "«завтра»" in v.event_when({"id": 9, "date_iso": "2026-11-02",
+                                          "text": "Завтра, с 13:00 до 16:00, ул. Авиаторов"}))
 
         only_cfg = dict(CFG, street_mode="only")
         only_out = v.digest_recent_outages(only_cfg, POSTS)

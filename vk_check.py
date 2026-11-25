@@ -346,6 +346,90 @@ def history_key(item):
     return (item.get("date_iso") or "0000-00-00", int(item["id"]))
 
 
+def fmt_iso(iso):
+    try:
+        d = datetime.strptime(iso, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return ""
+    return "%d %s %d" % (d.day, RU_MONTHS[d.month - 1], d.year)
+
+
+def text_date_iso(text, base_iso=""):
+    """Ищет дату в тексте записи: «2 ноября 2026» или «26 октября»."""
+    m = re.search(r"(\d{1,2})\s+(%s)(?:\s+(\d{4}))?" % "|".join(RU_MONTHS),
+                  (text or "").lower())
+    if not m:
+        return ""
+    day, month = int(m.group(1)), MONTH_NUM[m.group(2)]
+    year = m.group(3) or (base_iso or "")[:4]
+    if not year:
+        return ""
+    return "%04d-%02d-%02d" % (int(year), month, day)
+
+
+def event_date_iso(item):
+    """Дата отключения: из текста, иначе дата самой записи."""
+    return (text_date_iso(item.get("text"), item.get("date_iso") or "")
+            or item.get("date_iso") or "")
+
+
+def event_key(item):
+    return (event_date_iso(item) or "0000-00-00", int(item["id"]))
+
+
+def event_when(item):
+    """«2 ноября 2026, 10:00–17:00 (запись от 31 октября 2026)»."""
+    iso = event_date_iso(item)
+    post = item.get("date_iso") or ""
+    note = ""
+    if iso and post and iso != post:
+        note = "запись от " + fmt_iso(post)
+    elif "завтра" in (item.get("text") or "").lower():
+        note = "в тексте «завтра»"
+    when = fmt_iso(iso) if iso else "дата неизвестна"
+    tr = time_range(item.get("text") or "")
+    if tr:
+        when += ", " + tr
+    if note:
+        when += " (" + note + ")"
+    return when
+
+
+def time_range(text):
+    m = re.search(r"(\d{1,2})[:.](\d{2})\s*(?:до|—|–|-)\s*(\d{1,2})[:.](\d{2})",
+                  text or "")
+    if not m:
+        return ""
+    return "%s:%s–%s:%s" % (m.group(1), m.group(2), m.group(3), m.group(4))
+
+
+def street_addresses(text, cfg):
+    """Только адреса с нашей улицей, без остального текста."""
+    names = cfg.get("streets") or []
+    if not names:
+        return ""
+    m = re.search(r"адрес[а-я]*\s*:?\s*(.*)", text or "", re.I | re.S)
+    body = m.group(1) if m else (text or "")
+    found = []
+    for raw in re.split(r";|\n", body):
+        part = raw.strip(" -–—•\t.")
+        part = re.sub(r"\.\s*(?:Это связано|В связи с|Причина|Работы)[^.]*$", "",
+                      part, flags=re.I).strip(" -–—.")
+        low = normalize(part)
+        if part and any(normalize(n) in low for n in names):
+            found.append(re.sub(r"\s+", " ", part))
+    return "; ".join(dict.fromkeys(found))
+
+
+def short_when(item):
+    iso = event_date_iso(item)
+    when = fmt_iso(iso) if iso else "дата неизвестна"
+    tr = time_range(item.get("text") or "")
+    if tr:
+        when += " (%s)" % tr
+    return when
+
+
 def absolute_date(widget_date, now=None):
     """«вчера в 7:36» -> «24 ноября 2026, 07:36» (чтобы история не старела)."""
     s = (widget_date or "").strip()
@@ -418,9 +502,12 @@ def digest_recent_outages(cfg, posts, limit=5):
         return ("📰 Отключений %s пока не было.\nБот следит с 25.11.2026."
                 % street_phrase(cfg))
     lines = ["📰 Последние отключения %s:" % street_phrase(cfg), ""]
-    for p in list(reversed(outs))[:limit]:
-        lines.append("🗓 %s\n%s\n🔗 %s"
-                     % (p.get("date") or "—", short_text(p, 300), post_url(cfg, p)))
+    for p in sorted(outs, key=event_key, reverse=True)[:limit]:
+        lines.append("🗓 " + event_when(p))
+        addr = street_addresses(p.get("text") or "", cfg)
+        if addr:
+            lines.append("📍 " + addr)
+        lines.append("🔗 " + post_url(cfg, p))
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -430,17 +517,18 @@ def digest_last(cfg, posts):
     if not outs:
         return ("🕒 Пока не знаю: отключений %s ещё не видел.\nБот следит с 25.11.2026."
                 % street_phrase(cfg))
-    last = max(outs, key=history_key)
-    when = last.get("date") or "дата неизвестна"
-    ago = days_ago(last.get("date_iso"))
-    if ago:
-        when += " (%s)" % ago
+    ordered = sorted(outs, key=event_key)
+    last = ordered[-1]
     lines = ["🕒 Последнее отключение %s: %s."
-             % (street_phrase(cfg), when),
+             % (street_phrase(cfg), event_when(last)),
              "🔗 " + post_url(cfg, last)]
-    older = sorted(outs, key=history_key)[:-1]
-    if older:
-        lines.append("До этого: " + ", ".join((h.get("date") or "—") for h in older[-3:]) + ".")
+    dates = []
+    for h in reversed(ordered[:-1]):
+        d = short_when(h)
+        if d and d not in dates:
+            dates.append(d)
+    if dates:
+        lines.append("До этого: " + ", ".join(dates[:3]) + ".")
     return "\n".join(lines)
     last = max(outs, key=lambda p: p["id"])
     hits = street_hits(last.get("text") or "", cfg)
@@ -463,8 +551,9 @@ def digest_status(cfg, posts):
     ]
     outs = filter_by_street(known_outages(cfg, posts), cfg)
     if outs:
-        lo = max(outs, key=history_key)
-        lines.append("Последнее отключение: %s" % (lo.get("date") or "дата неизвестна"))
+        lo = max(outs, key=event_key)
+        d = fmt_iso(event_date_iso(lo)) or "дата неизвестна"
+        lines.append("Последнее отключение: %s" % d)
     else:
         lines.append("Последнее отключение: пока не видел")
     lines += ["", "Кнопки: /start"]
