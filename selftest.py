@@ -45,15 +45,18 @@ def main():
     check("улица Авиаторов найдена", v.street_hits(POSTS[1]["text"], CFG) == ["Авиаторов"])
     check("Авиационная не путается с Авиаторов", v.street_hits(POSTS[0]["text"], CFG) == [])
 
-    news = v.digest_news(CFG, POSTS)
-    check("в новостях 3 записи", news.count("🔗") == 3)
-    out = v.digest_outages(CFG, POSTS)
+    out = v.digest_recent_outages(CFG, POSTS)
     check("в отключениях 2 записи", out.count("🔗") == 2)
-    check("в отключениях помечена улица", "Авиаторов" in out)
-    last = v.digest_last(CFG, POSTS)
+    check("в отключениях помечены обе улицы", "Авиаторов" in out and "Авиационная" in out)
+
+    only_cfg = dict(CFG, street_mode="only")
+    only_out = v.digest_recent_outages(only_cfg, POSTS)
+    check("only: остаётся только Авиаторов", only_out.count("🔗") == 1 and "Авиационная" not in only_out)
+
+    last = v.digest_last(only_cfg, POSTS)
     check("последнее отключение — по Авиаторов", "Авиаторов" in last and "wall-11784072_2" in last)
-    status = v.digest_status(CFG, POSTS)
-    check("статус показывает проверку", "каждые 5 минут" in status)
+    status = v.digest_status(only_cfg, POSTS)
+    check("статус показывает проверку и улицу", "каждые 5 минут" in status and "Авиаторов" in status)
 
     prev, pool, new = v.compute_new(POSTS, {"max_id": 2})
     check("новые записи после 2", prev == 2 and pool == 3 and [p["id"] for p in new] == [3])
@@ -63,7 +66,6 @@ def main():
     to_send = v.pick_to_send([POSTS[1], POSTS[2]], {}, CFG)
     check("на отправку попадает только отключение", [p["id"] for p, _ in to_send] == [2])
 
-    only_cfg = dict(CFG, street_mode="only")
     to_send = v.pick_to_send(POSTS, {}, only_cfg)
     check("режим only оставляет только Авиаторов", [p["id"] for p, _ in to_send] == [2])
 

@@ -5,6 +5,6 @@
   "keywords_all": ["электроэнерг"],
   "keywords_any": ["тключен"],
   "streets": ["Авиаторов"],
-  "street_mode": "mark",
+  "street_mode": "only",
   "notify_on_start": true
 }

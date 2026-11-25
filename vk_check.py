@@ -47,20 +47,21 @@ BUTTON_RX = re.compile(r'<button[^>]*>.*?</button>', re.S)
 
 MENU_KEYBOARD = {
     "keyboard": [
-        ["📰 Последние новости", "⚡ Отключения"],
-        ["🕒 Когда отключали", "🔄 Проверить сейчас"],
-        ["ℹ️ Статус"],
+        ["📰 Последние отключения", "🕒 Когда отключали"],
+        ["🔄 Проверить сейчас", "ℹ️ Статус"],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
 }
 
+MENU_VERSION = 2
+
 BOT_COMMANDS = [
     {"command": "start", "description": "Меню и кнопки"},
-    {"command": "news", "description": "Последние записи сообщества"},
-    {"command": "outages", "description": "Отключения в ленте"},
+    {"command": "news", "description": "Последние отключения по Авиаторов"},
     {"command": "last", "description": "Когда последний раз отключали"},
     {"command": "status", "description": "Статус бота"},
+    {"command": "check", "description": "Проверить ВК сейчас"},
 ]
 
 
@@ -296,22 +297,24 @@ def outage_posts(posts, cfg):
     return [p for p in posts if is_outage(p.get("text") or "", cfg)]
 
 
-def digest_news(cfg, posts, limit=5):
-    latest = list(reversed(posts))[:limit]
-    lines = ["📰 Последние записи сообщества:", ""]
-    for p in latest:
-        lines.append("🗓 %s\n%s\n🔗 %s"
-                     % (p.get("date") or "—", short_text(p, 260), post_url(cfg, p)))
-        lines.append("")
-    return "\n".join(lines).strip()
+def filter_by_street(posts, cfg):
+    """В режиме only оставляет записи, где есть наша улица."""
+    if cfg.get("street_mode", "mark") != "only":
+        return posts
+    return [p for p in posts if street_hits(p.get("text") or "", cfg)]
 
 
-def digest_outages(cfg, posts, limit=5):
-    outs = outage_posts(posts, cfg)
+def street_phrase(cfg):
+    streets = cfg.get("streets") or []
+    return ("по ул. " + ", ".join(streets)) if streets else "по вашей улице"
+
+
+def digest_recent_outages(cfg, posts, limit=5):
+    outs = filter_by_street(outage_posts(posts, cfg), cfg)
     if not outs:
-        return ("⚡ В последних %d записях сообщества отключений электроэнергии не было."
-                % len(posts))
-    lines = ["⚡ Отключения электроэнергии в ленте:", ""]
+        return ("📰 В последних %d записях сообщества отключений %s не было."
+                % (len(posts), street_phrase(cfg)))
+    lines = ["📰 Последние отключения %s:" % street_phrase(cfg), ""]
     for p in list(reversed(outs))[:limit]:
         hits = street_hits(p.get("text") or "", cfg)
         mark = ("   ⚡ " + ", ".join(hits)) if hits else ""
@@ -322,10 +325,11 @@ def digest_outages(cfg, posts, limit=5):
 
 
 def digest_last(cfg, posts):
-    outs = outage_posts(posts, cfg)
+    outs = filter_by_street(outage_posts(posts, cfg), cfg)
     if not outs:
-        return ("🕒 В последних %d записях сообщества отключений не было.\n"
-                "Бот видит только 10 последних записей — более старые не проверяются." % len(posts))
+        return ("🕒 В последних %d записях сообщества отключений %s не было.\n"
+                "Бот видит только 10 последних записей — более старые не проверяются."
+                % (len(posts), street_phrase(cfg)))
     last = max(outs, key=lambda p: p["id"])
     hits = street_hits(last.get("text") or "", cfg)
     lines = ["🕒 Последнее отключение:", "", "🗓 " + (last.get("date") or "—")]
@@ -339,21 +343,18 @@ def digest_last(cfg, posts):
 
 
 def digest_status(cfg, posts):
-    last = max(posts, key=lambda p: p["id"])
     lines = [
         "ℹ️ Бот работает",
         "",
         "Проверка ВК: каждые 5 минут",
-        "Улица: %s" % (", ".join(cfg.get("streets") or []) or "не задана"),
-        "Режим улицы: %s" % cfg.get("street_mode", "mark"),
-        "Последняя запись: #%d, %s" % (last["id"], last.get("date") or "—"),
+        "Показываю: отключения %s" % street_phrase(cfg),
     ]
-    outs = outage_posts(posts, cfg)
+    outs = filter_by_street(outage_posts(posts, cfg), cfg)
     if outs:
         lo = max(outs, key=lambda p: p["id"])
-        lines.append("Последнее отключение: #%d, %s" % (lo["id"], lo.get("date") or "—"))
+        lines.append("Последнее отключение: %s (#%d)" % (lo.get("date") or "—", lo["id"]))
     else:
-        lines.append("Отключений в последних записях нет")
+        lines.append("В последних записях отключений не было")
     lines += ["", "Кнопки: /start"]
     return "\n".join(lines)
 
@@ -431,14 +432,10 @@ def tg_handle_update(token, chat_id, cfg, vk_token, update):
                 "Кнопки — внизу 👇", MENU_KEYBOARD)
         return True
 
-    if text == "📰 Последние новости" or low.startswith("/news"):
+    if (text in ("📰 Последние отключения", "📰 Последние новости", "⚡ Отключения")
+            or low.startswith("/news") or low.startswith("/outages")):
         posts, _ = get_posts(cfg, vk_token)
-        tg_send(token, chat_id, digest_news(cfg, posts))
-        return True
-
-    if text == "⚡ Отключения" or low.startswith("/outages"):
-        posts, _ = get_posts(cfg, vk_token)
-        tg_send(token, chat_id, digest_outages(cfg, posts))
+        tg_send(token, chat_id, digest_recent_outages(cfg, posts))
         return True
 
     if text == "🕒 Когда отключали" or low.startswith("/last"):
@@ -537,21 +534,22 @@ def main():
 
     if args.poll:
         st = load_json(STATE_PATH, {}) or {}
-        if not st.get("menu_sent"):
+        if st.get("menu_v") != MENU_VERSION:
             try:
                 tg_send(token, chat_id,
-                        "🤖 Бот обновился: теперь у меня есть кнопки — они внизу 👇",
+                        "🤖 Обновил меню: показываю только отключения электроэнергии %s. "
+                        "Кнопки — внизу 👇" % street_phrase(cfg),
                         MENU_KEYBOARD)
-                state_patch(menu_sent=True)
-                log("Меню с кнопками отправлено.")
+                state_patch(menu_v=MENU_VERSION)
+                log("Меню обновлено.")
             except Exception as e:
                 log("Не смог отправить меню: %s" % e)
-        if not st.get("commands_set"):
+        if st.get("commands_v") != MENU_VERSION:
             try:
                 tg_call(token, "setMyCommands",
                         {"commands": json.dumps(BOT_COMMANDS, ensure_ascii=False)})
-                state_patch(commands_set=True)
-                log("Команды бота зарегистрированы.")
+                state_patch(commands_v=MENU_VERSION)
+                log("Команды бота обновлены.")
             except Exception as e:
                 log("setMyCommands: %s" % e)
         poll_telegram(token, chat_id, cfg, vk_token)
@@ -589,12 +587,11 @@ def main():
                     "✅ Бот запущен и следит за сообществом\n"
                     "%s\n\n"
                     "Проверка каждые 5 минут.\n"
-                    "Улица для пометки: %s (режим: %s).\n"
+                    "Показываю: отключения %s.\n"
                     "Сейчас в ленте %d записей, стартовое состояние сохранено.\n\n"
                     "Кнопки — внизу 👇"
                     % (cfg.get("community_url", ""),
-                       ", ".join(cfg.get("streets", [])) or "не задана",
-                       cfg.get("street_mode", "mark"),
+                       street_phrase(cfg),
                        len(posts))
                 )
                 tg_send(token, chat_id, text, MENU_KEYBOARD)
