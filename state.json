@@ -2,5 +2,8 @@
   "max_id": 65688,
   "sent": [
     65681
-  ]
+  ],
+  "menu_sent": true,
+  "commands_set": true,
+  "tg_offset": 949632096
 }
