@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Мониторинг (каждые 5 минут, ~5,5 часов)
+      - name: Мониторинг (проверка ВК раз в 5 минут, кнопки — раз в минуту)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -39,9 +39,12 @@ jobs:
           set -u
           git config user.name "vk-alert-bot"
           git config user.email "bot@users.noreply.github.com"
-          for i in $(seq 1 64); do
-            echo "===== итерация $i из 64, $(date -u +%H:%M:%SZ) ====="
-            python vk_check.py --verbose || echo "ПРОВЕРКА ЗАВЕРШИЛАСЬ ОШИБКОЙ — продолжаю"
+          for i in $(seq 1 300); do
+            echo "===== минута $i из 300, $(date -u +%H:%M:%SZ) ====="
+            python vk_check.py --poll || echo "ОПРОС TELEGRAM ЗАВЕРШИЛСЯ ОШИБКОЙ — продолжаю"
+            if [ $(( (i - 1) % 5 )) -eq 0 ]; then
+              python vk_check.py --verbose || echo "ПРОВЕРКА ЗАВЕРШИЛАСЬ ОШИБКОЙ — продолжаю"
+            fi
             if [ -n "$(git status --porcelain state.json)" ]; then
               git add state.json
               git commit -q -m "state: update $(date -u +%Y-%m-%dT%H:%MZ)" || true
@@ -52,7 +55,7 @@ jobs:
                 sleep 5
               done
             fi
-            if [ "$i" -lt 64 ]; then sleep 300; fi
+            if [ "$i" -lt 300 ]; then sleep 60; fi
           done
 
   relay:

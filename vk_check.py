@@ -45,6 +45,24 @@ TEXT_RX = re.compile(r'class="wall_post_text"[^>]*>(.*?)</div>', re.S)
 DATE_RX = re.compile(r'class="wcommunity_post_date"[^>]*>([^<]+)<')
 BUTTON_RX = re.compile(r'<button[^>]*>.*?</button>', re.S)
 
+MENU_KEYBOARD = {
+    "keyboard": [
+        ["📰 Последние новости", "⚡ Отключения"],
+        ["🕒 Когда отключали", "🔄 Проверить сейчас"],
+        ["ℹ️ Статус"],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+BOT_COMMANDS = [
+    {"command": "start", "description": "Меню и кнопки"},
+    {"command": "news", "description": "Последние записи сообщества"},
+    {"command": "outages", "description": "Отключения в ленте"},
+    {"command": "last", "description": "Когда последний раз отключали"},
+    {"command": "status", "description": "Статус бота"},
+]
+
 
 def log(msg):
     print(time.strftime("[%H:%M:%S] ") + str(msg), flush=True)
@@ -203,8 +221,12 @@ def street_hits(text, cfg):
     return [s for s in cfg.get("streets", []) if normalize(s) and normalize(s) in n]
 
 
+def post_url(cfg, post):
+    return "https://vk.com/wall-%d_%d" % (int(cfg["group_id"]), post["id"])
+
+
 def build_message(post, cfg, hits):
-    link = "https://vk.com/wall-%d_%d" % (int(cfg["group_id"]), post["id"])
+    link = post_url(cfg, post)
     body = post["text"].strip()
     if len(body) > 3400:
         body = body[:3400].rstrip() + "…"
@@ -236,15 +258,240 @@ def tg_call(token, method, params=None, timeout=30):
         raise RuntimeError("Telegram недоступен: %s" % e.reason)
 
 
-def tg_send(token, chat_id, text):
-    res = tg_call(token, "sendMessage", {
+def tg_send(token, chat_id, text, reply_markup=None):
+    params = {
         "chat_id": chat_id,
-        "text": text,
+        "text": text[:4000],
         "disable_web_page_preview": "true",
-    })
+    }
+    if reply_markup:
+        params["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    res = tg_call(token, "sendMessage", params)
     if not res.get("ok"):
         raise RuntimeError("Telegram отказ: %s" % (res.get("description") or res))
     return res
+
+
+# ---------------------------------------------------------------------------
+#  Меню бота: кнопки, команды, опрос Telegram
+# ---------------------------------------------------------------------------
+
+def state_patch(**updates):
+    """Обновляет отдельные ключи state.json, не теряя остальные."""
+    cur = load_json(STATE_PATH, {}) or {}
+    cur.update(updates)
+    cur.pop("last_run", None)
+    save_json(STATE_PATH, cur)
+    return cur
+
+
+def short_text(post, limit=300):
+    t = re.sub(r"\s+", " ", post.get("text") or "").strip()
+    if len(t) > limit:
+        t = t[:limit].rstrip() + "…"
+    return t
+
+
+def outage_posts(posts, cfg):
+    return [p for p in posts if is_outage(p.get("text") or "", cfg)]
+
+
+def digest_news(cfg, posts, limit=5):
+    latest = list(reversed(posts))[:limit]
+    lines = ["📰 Последние записи сообщества:", ""]
+    for p in latest:
+        lines.append("🗓 %s\n%s\n🔗 %s"
+                     % (p.get("date") or "—", short_text(p, 260), post_url(cfg, p)))
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def digest_outages(cfg, posts, limit=5):
+    outs = outage_posts(posts, cfg)
+    if not outs:
+        return ("⚡ В последних %d записях сообщества отключений электроэнергии не было."
+                % len(posts))
+    lines = ["⚡ Отключения электроэнергии в ленте:", ""]
+    for p in list(reversed(outs))[:limit]:
+        hits = street_hits(p.get("text") or "", cfg)
+        mark = ("   ⚡ " + ", ".join(hits)) if hits else ""
+        lines.append("🗓 %s%s\n%s\n🔗 %s"
+                     % (p.get("date") or "—", mark, short_text(p, 300), post_url(cfg, p)))
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def digest_last(cfg, posts):
+    outs = outage_posts(posts, cfg)
+    if not outs:
+        return ("🕒 В последних %d записях сообщества отключений не было.\n"
+                "Бот видит только 10 последних записей — более старые не проверяются." % len(posts))
+    last = max(outs, key=lambda p: p["id"])
+    hits = street_hits(last.get("text") or "", cfg)
+    lines = ["🕒 Последнее отключение:", "", "🗓 " + (last.get("date") or "—")]
+    if hits:
+        lines.append("⚡ Улица: " + ", ".join(hits))
+    lines += ["", short_text(last, 1200), "", "🔗 " + post_url(cfg, last)]
+    older = sorted(outs, key=lambda p: p["id"])[:-1]
+    if older:
+        lines += ["", "До этого: " + ", ".join((p.get("date") or "—") for p in older[-3:])]
+    return "\n".join(lines)
+
+
+def digest_status(cfg, posts):
+    last = max(posts, key=lambda p: p["id"])
+    lines = [
+        "ℹ️ Бот работает",
+        "",
+        "Проверка ВК: каждые 5 минут",
+        "Улица: %s" % (", ".join(cfg.get("streets") or []) or "не задана"),
+        "Режим улицы: %s" % cfg.get("street_mode", "mark"),
+        "Последняя запись: #%d, %s" % (last["id"], last.get("date") or "—"),
+    ]
+    outs = outage_posts(posts, cfg)
+    if outs:
+        lo = max(outs, key=lambda p: p["id"])
+        lines.append("Последнее отключение: #%d, %s" % (lo["id"], lo.get("date") or "—"))
+    else:
+        lines.append("Отключений в последних записях нет")
+    lines += ["", "Кнопки: /start"]
+    return "\n".join(lines)
+
+
+def compute_new(posts, state, force_new_id=None):
+    pool_max = max(p["id"] for p in posts) if posts else 0
+    prev_max = int(state.get("max_id") or 0)
+    if force_new_id is not None:
+        prev_max = force_new_id
+    return prev_max, pool_max, [p for p in posts if p["id"] > prev_max]
+
+
+def pick_to_send(new_posts, state, cfg):
+    sent_ids = set(state.get("sent") or [])
+    to_send = []
+    for p in new_posts:
+        if p["id"] in sent_ids:
+            log("  пропуск %d: уже отправлялась раньше" % p["id"])
+            continue
+        if not is_outage(p["text"], cfg):
+            log("  пропуск %d: не про отключение электроэнергии" % p["id"])
+            continue
+        hits = street_hits(p["text"], cfg)
+        mode = cfg.get("street_mode", "mark")
+        if mode == "only" and not hits:
+            log("  пропуск %d: нет улицы из списка (режим only)" % p["id"])
+            continue
+        to_send.append((p, build_message(p, cfg, hits if mode != "off" else [])))
+    return to_send
+
+
+def send_notifications(cfg, token, chat_id, to_send):
+    for post, msg in to_send:
+        markup = {"inline_keyboard": [[
+            {"text": "🔗 Открыть запись в ВК", "url": post_url(cfg, post)}
+        ]]}
+        tg_send(token, chat_id, msg, markup)
+        log("Отправлено уведомление по записи %d" % post["id"])
+
+
+def handle_check_now(cfg, token, chat_id, vk_token):
+    posts, _raw = get_posts(cfg, vk_token)
+    state = load_json(STATE_PATH, {}) or {}
+    prev_max, pool_max, new_posts = compute_new(posts, state)
+    if prev_max <= 0:
+        state_patch(max_id=pool_max, sent=[])
+        return "Первый запуск: взял за старт запись #%d. Дальше буду присылать новые." % pool_max
+    if not new_posts:
+        last = max(posts, key=lambda p: p["id"])
+        return "🔄 Новых записей нет.\nПоследняя: #%d, %s" % (last["id"], last.get("date") or "—")
+    to_send = pick_to_send(new_posts, state, cfg)
+    if to_send:
+        send_notifications(cfg, token, chat_id, to_send)
+    sent = sorted(set(list(state.get("sent") or []) + [p["id"] for p, _ in to_send]))[-200:]
+    state_patch(max_id=max(pool_max, prev_max), sent=sent)
+    return "🔄 Новых записей: %d. Уведомлений об отключениях: %d." % (len(new_posts), len(to_send))
+
+
+def tg_handle_update(token, chat_id, cfg, vk_token, update):
+    msg = update.get("message") or {}
+    chat = msg.get("chat") or {}
+    if str(chat.get("id")) != str(chat_id):
+        log("Telegram: сообщение из чужого чата %s — игнорирую" % chat.get("id"))
+        return False
+    text = (msg.get("text") or "").strip()
+    if not text:
+        return False
+    low = normalize(text)
+
+    if low.startswith("/start") or low == "меню":
+        tg_send(token, chat_id,
+                "🤖 Бот «Отключения Кумертау»\n\n"
+                "Слежу за сообществом ВК и присылаю новые записи об отключениях "
+                "электроэнергии. Проверка каждые 5 минут.\n\n"
+                "Кнопки — внизу 👇", MENU_KEYBOARD)
+        return True
+
+    if text == "📰 Последние новости" or low.startswith("/news"):
+        posts, _ = get_posts(cfg, vk_token)
+        tg_send(token, chat_id, digest_news(cfg, posts))
+        return True
+
+    if text == "⚡ Отключения" or low.startswith("/outages"):
+        posts, _ = get_posts(cfg, vk_token)
+        tg_send(token, chat_id, digest_outages(cfg, posts))
+        return True
+
+    if text == "🕒 Когда отключали" or low.startswith("/last"):
+        posts, _ = get_posts(cfg, vk_token)
+        tg_send(token, chat_id, digest_last(cfg, posts))
+        return True
+
+    if text == "ℹ️ Статус" or low.startswith("/status"):
+        posts, _ = get_posts(cfg, vk_token)
+        tg_send(token, chat_id, digest_status(cfg, posts))
+        return True
+
+    if text == "🔄 Проверить сейчас" or low.startswith("/check"):
+        tg_send(token, chat_id, handle_check_now(cfg, token, chat_id, vk_token))
+        return True
+
+    tg_send(token, chat_id, "Не понял 🙂 Нажмите кнопку внизу или отправьте /start.")
+    return True
+
+
+def poll_telegram(token, chat_id, cfg, vk_token):
+    state = load_json(STATE_PATH, {}) or {}
+    offset = int(state.get("tg_offset") or 0)
+    params = {"timeout": 0, "limit": 100}
+    if offset:
+        params["offset"] = offset
+    res = tg_call(token, "getUpdates", params)
+    if not res.get("ok"):
+        log("Telegram getUpdates: %s" % (res.get("description") or res))
+        return
+    updates = res.get("result") or []
+    if not updates:
+        log("Telegram: новых сообщений нет")
+        return
+    new_offset = offset
+    seen = set()
+    for upd in updates:
+        new_offset = max(new_offset, int(upd.get("update_id") or 0) + 1)
+        msg = upd.get("message") or {}
+        key = (str((msg.get("chat") or {}).get("id")), (msg.get("text") or "").strip())
+        if key[1] and key in seen:
+            continue          # одинаковые команды в одной пачке — отвечаем один раз
+        seen.add(key)
+        try:
+            tg_handle_update(token, chat_id, cfg, vk_token, upd)
+        except Exception as e:
+            log("Ошибка обработки команды: %s" % e)
+            try:
+                tg_send(token, chat_id, "⚠️ Ошибка при выполнении команды: %s" % e)
+            except Exception:
+                pass
+    state_patch(tg_offset=new_offset)
+    log("Telegram: обработано сообщений: %d, offset=%d" % (len(updates), new_offset))
 
 
 def main():
@@ -255,6 +502,8 @@ def main():
     ap.add_argument("--force-new-id", type=int, default=None,
                     help="считать, что последняя известная запись имела этот id")
     ap.add_argument("--verbose", action="store_true", help="показать все записи и результат фильтра")
+    ap.add_argument("--poll", action="store_true",
+                    help="опросить Telegram: обработать кнопки и команды (без проверки ВК)")
     args = ap.parse_args()
 
     cfg = load_json(CONFIG_PATH, {}) or {}
@@ -286,16 +535,35 @@ def main():
         os.remove(STATE_PATH)
         log("Состояние сброшено.")
 
+    if args.poll:
+        st = load_json(STATE_PATH, {}) or {}
+        if not st.get("menu_sent"):
+            try:
+                tg_send(token, chat_id,
+                        "🤖 Бот обновился: теперь у меня есть кнопки — они внизу 👇",
+                        MENU_KEYBOARD)
+                state_patch(menu_sent=True)
+                log("Меню с кнопками отправлено.")
+            except Exception as e:
+                log("Не смог отправить меню: %s" % e)
+        if not st.get("commands_set"):
+            try:
+                tg_call(token, "setMyCommands",
+                        {"commands": json.dumps(BOT_COMMANDS, ensure_ascii=False)})
+                state_patch(commands_set=True)
+                log("Команды бота зарегистрированы.")
+            except Exception as e:
+                log("setMyCommands: %s" % e)
+        poll_telegram(token, chat_id, cfg, vk_token)
+        return 0
+
     posts, _raw = get_posts(cfg, vk_token)
     if not posts:
         log("ОШИБКА: список записей пуст")
         return 1
 
-    pool_max = max(p["id"] for p in posts)
     state = load_json(STATE_PATH, {}) or {}
-    prev_max = int(state.get("max_id") or 0)
-    if args.force_new_id is not None:
-        prev_max = args.force_new_id
+    prev_max, pool_max, new_posts = compute_new(posts, state, args.force_new_id)
 
     log("Диапазон записей: %d..%d, сохранённый max_id=%s"
         % (min(p["id"] for p in posts), pool_max, prev_max or "нет"))
@@ -315,44 +583,27 @@ def main():
     if prev_max <= 0:
         log("Первый запуск: стартовое состояние = %d, старые записи не отправляю." % pool_max)
         if not args.dry_run:
-            save_json(STATE_PATH, {
-                "max_id": pool_max,
-                "sent": [],
-            })
+            state_patch(max_id=pool_max, sent=[])
             if token and chat_id and cfg.get("notify_on_start", True):
                 text = (
                     "✅ Бот запущен и следит за сообществом\n"
                     "%s\n\n"
                     "Проверка каждые 5 минут.\n"
                     "Улица для пометки: %s (режим: %s).\n"
-                    "Сейчас в ленте %d записей, стартовое состояние сохранено."
+                    "Сейчас в ленте %d записей, стартовое состояние сохранено.\n\n"
+                    "Кнопки — внизу 👇"
                     % (cfg.get("community_url", ""),
                        ", ".join(cfg.get("streets", [])) or "не задана",
                        cfg.get("street_mode", "mark"),
                        len(posts))
                 )
-                tg_send(token, chat_id, text)
+                tg_send(token, chat_id, text, MENU_KEYBOARD)
                 log("Стартовое сообщение отправлено в Telegram.")
         return 0
 
-    new_posts = [p for p in posts if p["id"] > prev_max]
     log("Новых записей: %d" % len(new_posts))
 
-    sent_ids = set(state.get("sent") or [])
-    to_send = []
-    for p in new_posts:
-        if p["id"] in sent_ids:
-            log("  пропуск %d: уже отправлялась раньше" % p["id"])
-            continue
-        if not is_outage(p["text"], cfg):
-            log("  пропуск %d: не про отключение электроэнергии" % p["id"])
-            continue
-        hits = street_hits(p["text"], cfg)
-        mode = cfg.get("street_mode", "mark")
-        if mode == "only" and not hits:
-            log("  пропуск %d: нет улицы из списка (режим only)" % p["id"])
-            continue
-        to_send.append((p, build_message(p, cfg, hits if mode != "off" else [])))
+    to_send = pick_to_send(new_posts, state, cfg)
 
     if len(new_posts) >= 10:
         log("ВНИМАНИЕ: за интервал появилось 10+ записей — часть могла не попасть в виджет")
@@ -367,19 +618,14 @@ def main():
         if not token or not chat_id:
             log("ОШИБКА: нет TELEGRAM_TOKEN/TELEGRAM_CHAT_ID — некуда отправлять")
             return 1
-        for post, msg in to_send:
-            tg_send(token, chat_id, msg)
-            log("Отправлено уведомление по записи %d" % post["id"])
+        send_notifications(cfg, token, chat_id, to_send)
 
     if not args.dry_run:
         sent = list(state.get("sent") or [])
         for post, _msg in to_send:
             sent.append(post["id"])
         sent = sorted(set(sent))[-200:]
-        save_json(STATE_PATH, {
-            "max_id": max(pool_max, prev_max),
-            "sent": sent,
-        })
+        state_patch(max_id=max(pool_max, prev_max), sent=sent)
         log("Состояние сохранено: max_id=%d" % max(pool_max, prev_max))
 
     return 0
