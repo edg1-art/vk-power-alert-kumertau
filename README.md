@@ -24,3 +24,5 @@
 
 Секреты репозитория: `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`.
 Необязательный `VK_TOKEN` — запасной путь через официальный VK API.
+
+<!-- resync schedule 2026-11-25T07:37:31 -->
