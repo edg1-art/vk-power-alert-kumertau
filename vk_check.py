@@ -269,6 +269,11 @@ def main():
         log("ОШИБКА: в config.json не задан group_id")
         return 1
 
+    if not args.dry_run and (not token or not chat_id):
+        log("ОШИБКА: не заданы TELEGRAM_TOKEN/TELEGRAM_CHAT_ID — "
+            "не буду трогать состояние, чтобы не потерять записи")
+        return 1
+
     if args.test_telegram:
         if not token or not chat_id:
             log("ОШИБКА: нужны TELEGRAM_TOKEN и TELEGRAM_CHAT_ID")
