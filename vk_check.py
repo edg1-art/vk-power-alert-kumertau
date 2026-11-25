@@ -308,6 +308,43 @@ def outage_posts(posts, cfg):
 RU_MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня",
              "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 
+MONTH_NUM = {name: i + 1 for i, name in enumerate(RU_MONTHS)}
+
+
+def parse_date_iso(text):
+    """«2 ноября 2026 (дата в тексте)» -> «2026-11-02»."""
+    m = re.search(r"(\d{1,2})\s+(%s)\s+(\d{4})" % "|".join(RU_MONTHS),
+                  (text or "").lower())
+    if not m:
+        return ""
+    return "%04d-%02d-%02d" % (int(m.group(3)), MONTH_NUM[m.group(2)], int(m.group(1)))
+
+
+def days_ago(date_iso):
+    if not date_iso:
+        return ""
+    try:
+        d = datetime.strptime(date_iso, "%Y-%m-%d").date()
+    except ValueError:
+        return ""
+    today = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5))).date()
+    n = (today - d).days
+    if n <= 0:
+        return "сегодня"
+    if n == 1:
+        return "вчера"
+    if n % 10 == 1 and n % 100 != 11:
+        word = "день"
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = "дня"
+    else:
+        word = "дней"
+    return "%d %s назад" % (n, word)
+
+
+def history_key(item):
+    return (item.get("date_iso") or "0000-00-00", int(item["id"]))
+
 
 def absolute_date(widget_date, now=None):
     """«вчера в 7:36» -> «24 ноября 2026, 07:36» (чтобы история не старела)."""
@@ -333,6 +370,7 @@ def update_history(posts, cfg):
         hist[int(p["id"])] = {
             "id": p["id"],
             "date": absolute_date(p.get("date")),
+            "date_iso": parse_date_iso(absolute_date(p.get("date"))),
             "text": short_text(p, 700),
             "streets": post_hits(p, cfg),
         }
@@ -347,15 +385,19 @@ def known_outages(cfg, posts=None):
     hist = {}
     for h in (st.get("history") or []):
         if isinstance(h, dict) and h.get("id"):
+            h = dict(h)
+            if not h.get("date_iso"):
+                h["date_iso"] = parse_date_iso(h.get("date"))
             hist[int(h["id"])] = h
     for p in outage_posts(posts or [], cfg):
         hist[int(p["id"])] = {
             "id": p["id"],
             "date": p.get("date") or "",
+            "date_iso": parse_date_iso(absolute_date(p.get("date"))),
             "text": short_text(p, 700),
             "streets": post_hits(p, cfg),
         }
-    return sorted(hist.values(), key=lambda h: int(h["id"]))
+    return sorted(hist.values(), key=history_key)
 
 
 def filter_by_street(posts, cfg):
@@ -373,14 +415,12 @@ def street_phrase(cfg):
 def digest_recent_outages(cfg, posts, limit=5):
     outs = filter_by_street(known_outages(cfg, posts), cfg)
     if not outs:
-        return ("📰 В последних %d записях сообщества отключений %s не было."
-                % (len(posts), street_phrase(cfg)))
+        return ("📰 Отключений %s пока не было.\nБот следит с 25.11.2026."
+                % street_phrase(cfg))
     lines = ["📰 Последние отключения %s:" % street_phrase(cfg), ""]
     for p in list(reversed(outs))[:limit]:
-        hits = post_hits(p, cfg)
-        mark = ("   ⚡ " + ", ".join(hits)) if hits else ""
-        lines.append("🗓 %s%s\n%s\n🔗 %s"
-                     % (p.get("date") or "—", mark, short_text(p, 300), post_url(cfg, p)))
+        lines.append("🗓 %s\n%s\n🔗 %s"
+                     % (p.get("date") or "—", short_text(p, 300), post_url(cfg, p)))
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -388,9 +428,20 @@ def digest_recent_outages(cfg, posts, limit=5):
 def digest_last(cfg, posts):
     outs = filter_by_street(known_outages(cfg, posts), cfg)
     if not outs:
-        return ("🕒 В последних %d записях сообщества отключений %s не было.\n"
-                "Бот запоминает отключения начиная с 25.11.2026."
-                % (len(posts), street_phrase(cfg)))
+        return ("🕒 Пока не знаю: отключений %s ещё не видел.\nБот следит с 25.11.2026."
+                % street_phrase(cfg))
+    last = max(outs, key=history_key)
+    when = last.get("date") or "дата неизвестна"
+    ago = days_ago(last.get("date_iso"))
+    if ago:
+        when += " (%s)" % ago
+    lines = ["🕒 Последнее отключение %s: %s."
+             % (street_phrase(cfg), when),
+             "🔗 " + post_url(cfg, last)]
+    older = sorted(outs, key=history_key)[:-1]
+    if older:
+        lines.append("До этого: " + ", ".join((h.get("date") or "—") for h in older[-3:]) + ".")
+    return "\n".join(lines)
     last = max(outs, key=lambda p: p["id"])
     hits = street_hits(last.get("text") or "", cfg)
     lines = ["🕒 Последнее отключение:", "", "🗓 " + (last.get("date") or "—")]
@@ -408,14 +459,14 @@ def digest_status(cfg, posts):
         "ℹ️ Бот работает",
         "",
         "Проверка ВК: каждые 5 минут",
-        "Показываю: отключения %s" % street_phrase(cfg),
+        "Слежу: отключения %s" % street_phrase(cfg),
     ]
     outs = filter_by_street(known_outages(cfg, posts), cfg)
     if outs:
-        lo = max(outs, key=lambda p: int(p["id"]))
-        lines.append("Последнее отключение: %s (#%d)" % (lo.get("date") or "—", int(lo["id"])))
+        lo = max(outs, key=history_key)
+        lines.append("Последнее отключение: %s" % (lo.get("date") or "дата неизвестна"))
     else:
-        lines.append("В последних записях отключений не было")
+        lines.append("Последнее отключение: пока не видел")
     lines += ["", "Кнопки: /start"]
     return "\n".join(lines)
 
@@ -463,16 +514,19 @@ def handle_check_now(cfg, token, chat_id, vk_token):
     prev_max, pool_max, new_posts = compute_new(posts, state)
     if prev_max <= 0:
         state_patch(max_id=pool_max, sent=[])
-        return "Первый запуск: взял за старт запись #%d. Дальше буду присылать новые." % pool_max
+        return "Первый запуск: запомнил текущие записи, дальше буду присылать новое."
     if not new_posts:
-        last = max(posts, key=lambda p: p["id"])
-        return "🔄 Новых записей нет.\nПоследняя: #%d, %s" % (last["id"], last.get("date") or "—")
+        return "🔄 Новых записей в сообществе нет."
     to_send = pick_to_send(new_posts, state, cfg)
     if to_send:
         send_notifications(cfg, token, chat_id, to_send)
     sent = sorted(set(list(state.get("sent") or []) + [p["id"] for p, _ in to_send]))[-200:]
     state_patch(max_id=max(pool_max, prev_max), sent=sent)
-    return "🔄 Новых записей: %d. Уведомлений об отключениях: %d." % (len(new_posts), len(to_send))
+    if not to_send:
+        return ("🔄 Новых записей: %d. Отключений %s среди них нет."
+                % (len(new_posts), street_phrase(cfg)))
+    return ("🔄 Новых записей: %d. Отправил уведомлений: %d."
+            % (len(new_posts), len(to_send)))
 
 
 def tg_handle_update(token, chat_id, cfg, vk_token, update):

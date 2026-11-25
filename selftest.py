@@ -100,6 +100,11 @@ def main():
 
         hist = v.filter_by_street(v.known_outages(only_cfg, POSTS), only_cfg)
         check("история отдаёт только Авиаторов", [h["id"] for h in hist] == [2])
+        check("у истории есть машинная дата", all(h.get("date_iso") for h in hist))
+
+        check("дата «2 ноября 2026» распознаётся",
+              v.parse_date_iso("2 ноября 2026") == "2026-11-02")
+        check("«дней назад» считается", v.days_ago("2026-11-02").endswith("назад"))
 
         check("«вчера» становится датой", ", 7:36" in v.absolute_date("вчера в 7:36"))
         check("обычная дата не меняется",
