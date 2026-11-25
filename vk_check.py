@@ -370,8 +370,8 @@ def main():
 
     if not args.dry_run:
         sent = list(state.get("sent") or [])
-        for p in new_posts:
-            sent.append(p["id"])
+        for post, _msg in to_send:
+            sent.append(post["id"])
         sent = sorted(set(sent))[-200:]
         save_json(STATE_PATH, {
             "max_id": max(pool_max, prev_max),
