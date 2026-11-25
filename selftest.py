@@ -69,7 +69,7 @@ def main():
         last = v.digest_last(only_cfg, POSTS)
         check("последнее отключение — по Авиаторов", "Авиаторов" in last and "wall-11784072_2" in last)
         status = v.digest_status(only_cfg, POSTS)
-        check("статус показывает проверку и улицу", "каждые 5 минут" in status and "Авиаторов" in status)
+        check("статус показывает проверку и улицу", "каждую минуту" in status and "Авиаторов" in status)
 
         prev, pool, new = v.compute_new(POSTS, {"max_id": 2})
         check("новые записи после 2", prev == 2 and pool == 3 and [p["id"] for p in new] == [3])
@@ -112,6 +112,19 @@ def main():
         check("дата «2 ноября 2026» распознаётся",
               v.parse_date_iso("2 ноября 2026") == "2026-11-02")
         check("«дней назад» считается", v.days_ago("2026-11-02").endswith("назад"))
+
+        old_md = v.HISTORY_MD_PATH
+        v.HISTORY_MD_PATH = tmp + ".md"
+        try:
+            v.write_history_md(only_cfg)
+            with open(v.HISTORY_MD_PATH, "r", encoding="utf-8") as f:
+                md = f.read()
+            check("история пишется в файл",
+                  "Авиаторов" in md and "24 ноября 2026" in md)
+        finally:
+            if os.path.exists(v.HISTORY_MD_PATH):
+                os.remove(v.HISTORY_MD_PATH)
+            v.HISTORY_MD_PATH = old_md
 
         check("«вчера» становится датой", ", 7:36" in v.absolute_date("вчера в 7:36"))
         check("обычная дата не меняется",

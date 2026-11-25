@@ -1,7 +1,7 @@
 name: VK power alert (chain)
 
-# Самоподдерживающаяся цепочка: один запуск работает ~5,5 часа (проверка каждые
-# 5 минут), затем запускает следующий такой же. Нужна потому, что штатный cron
+# Самоподдерживающаяся цепочка: один запуск работает ~5 часов (проверка
+# каждую минуту), затем запускает следующий такой же. Нужна потому, что штатный cron
 # GitHub в 2026 году у новых репозиториев часто не срабатывает вообще.
 
 on:
@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Мониторинг (проверка ВК раз в 5 минут, кнопки — раз в минуту)
+      - name: Мониторинг (проверка ВК и кнопок каждую минуту)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -42,11 +42,10 @@ jobs:
           for i in $(seq 1 300); do
             echo "===== минута $i из 300, $(date -u +%H:%M:%SZ) ====="
             python vk_check.py --poll || echo "ОПРОС TELEGRAM ЗАВЕРШИЛСЯ ОШИБКОЙ — продолжаю"
-            if [ $(( (i - 1) % 5 )) -eq 0 ]; then
-              python vk_check.py --verbose || echo "ПРОВЕРКА ЗАВЕРШИЛАСЬ ОШИБКОЙ — продолжаю"
-            fi
-            if [ -n "$(git status --porcelain state.json)" ]; then
-              git add state.json
+            python vk_check.py --verbose || echo "ПРОВЕРКА ЗАВЕРШИЛАСЬ ОШИБКОЙ — продолжаю"
+            [ -f "ИСТОРИЯ-ОТКЛЮЧЕНИЙ.md" ] && git add "ИСТОРИЯ-ОТКЛЮЧЕНИЙ.md"
+            git add state.json
+            if ! git diff --cached --quiet; then
               git commit -q -m "state: update $(date -u +%Y-%m-%dT%H:%MZ)" || true
               for a in 1 2 3; do
                 if git pull --rebase --autostash -q origin main && git push -q origin main; then

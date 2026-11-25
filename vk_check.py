@@ -30,6 +30,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 LOCAL_CONFIG_PATH = os.path.join(ROOT, "config.local.json")
 STATE_PATH = os.path.join(ROOT, "state.json")
+HISTORY_MD_PATH = os.path.join(ROOT, "ИСТОРИЯ-ОТКЛЮЧЕНИЙ.md")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -548,7 +549,7 @@ def digest_status(cfg, posts):
     lines = [
         "ℹ️ Бот работает",
         "",
-        "Проверка ВК: каждые 5 минут",
+        "Проверка ВК: каждую минуту",
         "Слежу: отключения %s" % street_phrase(cfg),
     ]
     outs = filter_by_street(known_outages(cfg, posts), cfg)
@@ -560,6 +561,38 @@ def digest_status(cfg, posts):
         lines.append("Последнее отключение: пока не видел")
     lines += ["", "Кнопки: /start"]
     return "\n".join(lines)
+
+
+def save_text(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def write_history_md(cfg):
+    """Человекочитаемая история отключений — обновляется автоматически."""
+    items = sorted(filter_by_street(known_outages(cfg), cfg),
+                   key=event_key, reverse=True)
+    lines = [
+        "# История отключений электроэнергии",
+        "",
+        "Файл обновляется ботом автоматически. Показаны отключения %s."
+        % street_phrase(cfg),
+        "",
+        "| Дата | Время | Адрес | Запись ВК |",
+        "|---|---|---|---|",
+    ]
+    for it in items:
+        when = fmt_iso(event_date_iso(it)) or "—"
+        tr = time_range(it.get("text") or "") or "—"
+        addr = (street_addresses(it.get("text") or "", cfg) or "—").replace("|", "/")
+        lines.append("| %s | %s | %s | [#%d](%s) |"
+                     % (when, tr, addr, int(it["id"]), post_url(cfg, it)))
+    if not items:
+        lines.append("| — | — | — | — |")
+    lines += ["", "Всего: %d." % len(items), ""]
+    save_text(HISTORY_MD_PATH, "\n".join(lines))
 
 
 def compute_new(posts, state, force_new_id=None):
@@ -601,6 +634,7 @@ def send_notifications(cfg, token, chat_id, to_send):
 def handle_check_now(cfg, token, chat_id, vk_token):
     posts, _raw = get_posts(cfg, vk_token)
     update_history(posts, cfg)
+    write_history_md(cfg)
     state = load_json(STATE_PATH, {}) or {}
     prev_max, pool_max, new_posts = compute_new(posts, state)
     if prev_max <= 0:
@@ -635,7 +669,7 @@ def tg_handle_update(token, chat_id, cfg, vk_token, update):
         tg_send(token, chat_id,
                 "🤖 Бот «Отключения Кумертау»\n\n"
                 "Слежу за сообществом ВК и присылаю новые записи об отключениях "
-                "электроэнергии. Проверка каждые 5 минут.\n\n"
+                "электроэнергии. Проверка каждую минуту.\n\n"
                 "Кнопки — внизу 👇", MENU_KEYBOARD)
         return True
 
@@ -768,6 +802,7 @@ def main():
         return 1
     if not args.dry_run:
         update_history(posts, cfg)
+        write_history_md(cfg)
 
     state = load_json(STATE_PATH, {}) or {}
     prev_max, pool_max, new_posts = compute_new(posts, state, args.force_new_id)
@@ -795,7 +830,7 @@ def main():
                 text = (
                     "✅ Бот запущен и следит за сообществом\n"
                     "%s\n\n"
-                    "Проверка каждые 5 минут.\n"
+                    "Проверка каждую минуту.\n"
                     "Показываю: отключения %s.\n"
                     "Сейчас в ленте %d записей, стартовое состояние сохранено.\n\n"
                     "Кнопки — внизу 👇"
