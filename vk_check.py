@@ -317,7 +317,6 @@ def main():
         if not args.dry_run:
             save_json(STATE_PATH, {
                 "max_id": pool_max,
-                "last_run": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "sent": [],
             })
             if token and chat_id and cfg.get("notify_on_start", True):
@@ -375,7 +374,6 @@ def main():
         sent = sorted(set(sent))[-200:]
         save_json(STATE_PATH, {
             "max_id": max(pool_max, prev_max),
-            "last_run": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "sent": sent,
         })
         log("Состояние сохранено: max_id=%d" % max(pool_max, prev_max))
