@@ -338,8 +338,12 @@ def main():
     new_posts = [p for p in posts if p["id"] > prev_max]
     log("Новых записей: %d" % len(new_posts))
 
+    sent_ids = set(state.get("sent") or [])
     to_send = []
     for p in new_posts:
+        if p["id"] in sent_ids:
+            log("  пропуск %d: уже отправлялась раньше" % p["id"])
+            continue
         if not is_outage(p["text"], cfg):
             log("  пропуск %d: не про отключение электроэнергии" % p["id"])
             continue

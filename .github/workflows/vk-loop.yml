@@ -1,0 +1,90 @@
+name: VK power alert (chain)
+
+# Самоподдерживающаяся цепочка: один запуск работает ~5,5 часа (проверка каждые
+# 5 минут), затем запускает следующий такой же. Нужна потому, что штатный cron
+# GitHub в 2026 году у новых репозиториев часто не срабатывает вообще.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: vk-loop
+  cancel-in-progress: false
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Скачать репозиторий
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Мониторинг (каждые 5 минут, ~5,5 часов)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          VK_TOKEN: ${{ secrets.VK_TOKEN }}
+        run: |
+          set -u
+          git config user.name "vk-alert-bot"
+          git config user.email "bot@users.noreply.github.com"
+          for i in $(seq 1 64); do
+            echo "===== итерация $i из 64, $(date -u +%H:%M:%SZ) ====="
+            python vk_check.py --verbose || echo "ПРОВЕРКА ЗАВЕРШИЛАСЬ ОШИБКОЙ — продолжаю"
+            if [ -n "$(git status --porcelain state.json)" ]; then
+              git add state.json
+              git commit -q -m "state: update $(date -u +%Y-%m-%dT%H:%MZ)" || true
+              for a in 1 2 3; do
+                if git pull --rebase --autostash -q origin main && git push -q origin main; then
+                  break
+                fi
+                sleep 5
+              done
+            fi
+            if [ "$i" -lt 64 ]; then sleep 300; fi
+          done
+
+  relay:
+    needs: loop
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Передать эстафету следующему запуску
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -u
+          for a in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d '{"ref":"main"}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/vk-loop.yml/dispatches")
+            echo "передача эстафеты, попытка $a -> HTTP $code"
+            if [ "$code" = "204" ]; then exit 0; fi
+            if [ "$code" = "404" ]; then
+              echo "workflow отключён — цепочка остановлена, эстафета не передаётся"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "ОШИБКА: не удалось передать эстафету"
+          curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+            --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+            --data-urlencode "text=⚠️ VK-бот: цепочка остановилась (не удалась самопередача). Запустите вручную: GitHub → Actions → «VK power alert (chain)» → Run workflow." > /dev/null || true
+          exit 1
